@@ -1,94 +1,77 @@
 import os
+import re
 import requests
-import time
 from tqdm import tqdm
 
-def get_video_info(video_url):
-    response = requests.head(video_url)
-    if response.status_code == 200:
-        size = int(response.headers.get("Content-Length", 0))
-        size_readable = convert_bytes_to_human_readable(size)
-        return size_readable
-    else:
-        return f"Failed to fetch video information. Status code: {response.status_code}"
+def sanitize_filename(filename):
+    """Remove any invalid characters from the filename."""
+    return re.sub(r'[\\/*?:"<>|]', "", filename)
 
-def download_video(video_url, video_title):
-    video_response = requests.get(video_url, stream=True)
-    if video_response.status_code == 200:
-        file_size = int(video_response.headers.get("Content-Length", 0))
-        file_size_readable = convert_bytes_to_human_readable(file_size)
-
-        print(f"Downloading video '{video_title}'...")
-        start_time = time.time()
-
-        file_extension = "mp4"  # Assuming the video is in mp4 format
-        file_name = f"{video_title}.{file_extension}"
-
-        with open(file_name, 'wb') as file:
-            with tqdm(total=file_size, unit='B', unit_scale=True, unit_divisor=1024) as pbar:
-                for chunk in video_response.iter_content(chunk_size=1024):
-                    if chunk:
-                        file.write(chunk)
-                        pbar.update(len(chunk))
-
-        elapsed_time = time.time() - start_time
-        elapsed_time_readable = convert_seconds_to_human_readable(elapsed_time)
-
-        print(f"\nDownload completed. File size: {file_size_readable}.")
-        print(f"Elapsed time: {elapsed_time_readable}")
-        print(f"Video saved as: {file_name}")
-
-    else:
-        print(f"Failed to download video. Status code: {video_response.status_code}")
+def download_video(video_url, video_title, file_extension):
+    try:
+        sanitized_title = sanitize_filename(video_title)
+        file_name = f"{sanitized_title}.{file_extension}"
+        response = requests.get(video_url, stream=True)
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        block_size = 1024
+        
+        with open(file_name, 'wb') as file, tqdm(
+            desc=file_name,
+            total=total_size,
+            unit='iB',
+            unit_scale=True,
+            unit_divisor=1024,
+        ) as bar:
+            for chunk in response.iter_content(chunk_size=block_size):
+                if chunk:
+                    file.write(chunk)
+                    bar.update(len(chunk))
+        print(f"\nVideo saved as: {file_name}")
+    except requests.RequestException as e:
+        print(f"Failed to download video. Error: {e}")
 
 def get_vimeo_video_info(video_id):
     vimeo_config_url = f"https://player.vimeo.com/video/{video_id}/config"
-    response = requests.get(vimeo_config_url)
-
-    if response.status_code == 200:
+    try:
+        response = requests.get(vimeo_config_url)
+        response.raise_for_status()
         config_data = response.json()
 
-        if "video" in config_data and "title" in config_data["video"]:
-            video_title = config_data["video"]["title"]
-        else:
-            video_title = "Untitled"
+        video_title = config_data.get("video", {}).get("title")
+        if not video_title:
+            return "Failed to retrieve video title.", None, None
 
-        if "request" in config_data and "files" in config_data["request"] and "progressive" in config_data["request"]["files"]:
-            progressive_files = config_data["request"]["files"]["progressive"]
-            if progressive_files:
-                highest_quality_file = max(progressive_files, key=lambda x: x["height"])
-                video_url = highest_quality_file["url"]
-                return video_url, video_title
+        files = config_data.get("request", {}).get("files", {})
+
+        # Check for MP4 format
+        if "progressive" in files:
+            # Progressive option (MP4)
+            progressive_files = files["progressive"]
+            best_quality = max(progressive_files, key=lambda x: x['width'])
+            video_url = best_quality["url"]
+            file_extension = "mp4"
+            return video_url, video_title, file_extension
+        else:
+            # Check for HLS or DASH formats
+            if "hls" in files or "dash" in files:
+                return "This video is available only in HLS or DASH format, which cannot be downloaded as an MP4.", None, None
             else:
-                return "No progressive video file found in the player config", None
-        else:
-            return "Invalid player config data", None
-    else:
-        return f"Failed to fetch player config. Status code: {response.status_code}", None
-
-def convert_bytes_to_human_readable(size_in_bytes):
-    units = ['B', 'KB', 'MB', 'GB', 'TB']
-    index = 0
-
-    while size_in_bytes >= 1024 and index < len(units) - 1:
-        size_in_bytes /= 1024.0
-        index += 1
-
-    return f"{size_in_bytes:.2f} {units[index]}"
-
-def convert_seconds_to_human_readable(seconds):
-    minutes, seconds = divmod(seconds, 60)
-    hours, minutes = divmod(minutes, 60)
-
-    return f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
+                return "No downloadable video file found in the player config.", None, None
+    except requests.RequestException as e:
+        return f"Failed to fetch player config. Error: {e}", None, None
 
 if __name__ == "__main__":
     video_id = input("Enter the Vimeo video ID: ")
     video_info = get_vimeo_video_info(video_id)
 
     if isinstance(video_info, tuple):
-        video_url, video_title = video_info
-        print(f"Video Information:\nURL: {video_url}\nTitle: {video_title}")
-        download_video(video_url, video_title)
+        video_url, video_title, file_extension = video_info
+        if video_url and video_title:
+            print(f"Video Information:\nURL: {video_url}\nTitle: {video_title}")
+            download_video(video_url, video_title, file_extension)
+        else:
+            print(f"Error: {video_title}")
     else:
         print(video_info)
